@@ -1,0 +1,61 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 90-worker-swap
+spec:
+  config:
+    ignition:
+      version: 3.5.0
+    systemd:
+      units:
+        - name: swap-provision.service
+          enabled: true
+          contents: |
+            [Unit]
+            Description=Provision and enable swap on NVMe or fallback to file
+            ConditionFirstBoot=no
+
+            [Service]
+            Type=oneshot
+            ExecStart=/bin/bash -c '\
+              FOUND=0; \
+              for dev in /dev/nvme*n1; do \
+                [ -b "$dev" ] || continue; \
+                mount | grep -q "$dev" && continue; \
+                TYPE=$(blkid -s TYPE -o value "$dev"); \
+                [ -n "$TYPE" ] && [ "$TYPE" != "swap" ] && continue; \
+                echo "Using $dev as swap"; \
+                mkswap "$dev"; \
+                swapon "$dev"; \
+                FOUND=1; \
+                break; \
+              done; \
+              if [ "$FOUND" -eq 0 ]; then \
+                MEM_KB=$(grep MemTotal /proc/meminfo | awk "{print \$2}"); \
+                SIZE_MB=$((MEM_KB / 2048)); \
+                echo "No NVMe found, using /var/tmp/swapfile with size ${SIZE_MB} MB"; \
+                mkdir -p /var/tmp; \
+                fallocate -l ${SIZE_MB}M /var/tmp/swapfile; \
+                chmod 600 /var/tmp/swapfile; \
+                mkswap /var/tmp/swapfile; \
+                swapon /var/tmp/swapfile; \
+              fi'
+
+            [Install]
+            RequiredBy=kubelet-dependencies.target
+
+        - name: cgroup-system-slice-config.service
+          enabled: true
+          contents: |
+            [Unit]
+            Description=Restrict swap for system slice
+            ConditionFirstBoot=no
+
+            [Service]
+            Type=oneshot
+            ExecStart=/bin/sh -c "sudo systemctl set-property --runtime system.slice MemorySwapMax=0 IODeviceLatencyTargetSec=\"/ 50ms\""
+
+            [Install]
+            RequiredBy=kubelet-dependencies.target
